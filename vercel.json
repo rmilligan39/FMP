@@ -2,9 +2,22 @@
   "functions": {
     "api/research.js": {
       "maxDuration": 300
+    },
+    "api/report.js": {
+      "maxDuration": 10
+    },
+    "api/reports.js": {
+      "maxDuration": 10
+    },
+    "api/setup-db.js": {
+      "maxDuration": 15
     }
   },
   "rewrites": [
-    { "source": "/api/research", "destination": "/api/research.js" }
+    { "source": "/api/research", "destination": "/api/research.js" },
+    { "source": "/api/report/:id", "destination": "/api/report.js" },
+    { "source": "/api/reports", "destination": "/api/reports.js" },
+    { "source": "/api/setup-db", "destination": "/api/setup-db.js" },
+    { "source": "/report/:id", "destination": "/index.html" }
   ]
 }
