@@ -1,4 +1,5 @@
 const https = require('https');
+const { Pool } = require('pg');
 
 /* ═══════════════════════════════════════════════════════════════════════════
    CONFIG
@@ -516,6 +517,15 @@ body { font-family: Arial, sans-serif; font-size: 16px; line-height: 1.6; color:
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+   HELPERS
+   ═══════════════════════════════════════════════════════════════════════════ */
+function generateReportId(ticker) {
+  const date = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  const rand = Math.random().toString(36).slice(2, 6);
+  return `${ticker}-${date}-${rand}`;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
    VERCEL HANDLER
    ═══════════════════════════════════════════════════════════════════════════ */
 module.exports = async (req, res) => {
@@ -554,12 +564,10 @@ module.exports = async (req, res) => {
       }
     } catch (fmpErr) {
       console.error(`[TFG Research] FMP fetch error: ${fmpErr.message}`);
-      // Continue without metrics — Claude will use training knowledge
     }
 
     // Build prompt and call Anthropic
     const prompt = buildPrompt(query, metrics);
-
     console.log(`[TFG Research] Calling Anthropic (prompt length: ${prompt.length} chars)`);
 
     const { status, data } = await anthropicPost({
@@ -588,7 +596,41 @@ module.exports = async (req, res) => {
     }
 
     console.log(`[TFG Research] Report generated (${html.length} chars)`);
-    return res.status(200).json({ html, source: 'fmp', ticker: metrics?.ticker || ticker });
+
+    // Save to database
+    const reportId = generateReportId(ticker);
+    const companyName = metrics?.companyName || ticker;
+
+    if (process.env.DATABASE_URL) {
+      const pool = new Pool({
+        connectionString: process.env.DATABASE_URL,
+        ssl: { rejectUnauthorized: false },
+      });
+      try {
+        await pool.query(
+          `INSERT INTO reports (id, ticker, company_name, html, source)
+           VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT (id) DO UPDATE SET html = $4, company_name = $3, created_at = NOW()`,
+          [reportId, ticker, companyName, html, 'fmp']
+        );
+        console.log(`[TFG Research] Report saved: ${reportId}`);
+      } catch (dbErr) {
+        // Log but don't fail the request — report still works, just not shareable
+        console.error(`[TFG Research] DB save error: ${dbErr.message}`);
+      } finally {
+        await pool.end();
+      }
+    } else {
+      console.log('[TFG Research] No DATABASE_URL — skipping save.');
+    }
+
+    return res.status(200).json({
+      html,
+      reportId,
+      ticker: metrics?.ticker || ticker,
+      companyName,
+      source: 'fmp',
+    });
 
   } catch (err) {
     console.error(`[TFG Research] Function error: ${err.message}`);
