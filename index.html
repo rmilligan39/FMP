@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TFG Family Investment Research</title>
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;0,700;1,400&family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --gold: #AD9551;
+      --gold-light: #c8b06e;
+      --gold-dim: rgba(173,149,81,0.15);
+      --navy: #1a1a2e;
+      --charcoal: #2c2c3e;
+      --off-white: #f8f7f4;
+      --mid-gray: #9a9a9a;
+      --border: #e0ddd6;
+      --red: #c0392b;
+    }
+
+    html, body { height: 100%; font-family: 'IBM Plex Sans', sans-serif; background: #ffffff; color: var(--navy); }
+
+    .screen { display: none; }
+    .screen.active { display: flex; }
+
+    /* ─── LANDING ─── */
+    #landing {
+      min-height: 100vh; flex-direction: column; align-items: center; justify-content: center;
+      background: #ffffff; padding: 40px 20px; position: relative; overflow: hidden;
+    }
+    #landing::before {
+      content: ''; position: absolute; inset: 0;
+      background-image: linear-gradient(rgba(173,149,81,0.04) 1px, transparent 1px),
+                        linear-gradient(90deg, rgba(173,149,81,0.04) 1px, transparent 1px);
+      background-size: 48px 48px; pointer-events: none;
+    }
+    .brand-mark {
+      width: 48px; height: 48px; margin-bottom: 12px;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .brand-name {
+      font-family: 'Playfair Display', serif; font-size: 28px; font-weight: 700;
+      color: var(--navy); letter-spacing: -0.02em; margin-bottom: 2px;
+    }
+    .brand-sub {
+      font-size: 12px; font-weight: 500; letter-spacing: 0.18em; text-transform: uppercase;
+      color: var(--gold); margin-bottom: 40px;
+    }
+    .input-card {
+      background: white; border: 1px solid var(--border); border-radius: 6px;
+      padding: 36px 32px; width: 100%; max-width: 460px; position: relative; z-index: 1;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.06);
+    }
+    .field { margin-bottom: 20px; }
+    .field label {
+      display: block; font-size: 12px; font-weight: 600; letter-spacing: 0.06em;
+      text-transform: uppercase; color: var(--mid-gray); margin-bottom: 6px;
+    }
+    .field input {
+      width: 100%; padding: 12px 14px; border: 1.5px solid var(--border); border-radius: 4px;
+      font-family: 'IBM Plex Mono', monospace; font-size: 15px; color: var(--navy);
+      background: #fafaf8; transition: border-color 0.2s;
+    }
+    .field input:focus { outline: none; border-color: var(--gold); }
+    .field input::placeholder { color: #bbb; font-family: 'IBM Plex Sans', sans-serif; font-size: 13px; }
+    .data-badge {
+      display: inline-flex; align-items: center; gap: 5px;
+      font-size: 10px; color: var(--mid-gray); margin-bottom: 16px; letter-spacing: 0.02em;
+    }
+    .data-badge .dot { width: 6px; height: 6px; border-radius: 50%; background: #22c55e; }
+    #btn-generate {
+      width: 100%; padding: 14px; background: var(--navy); color: white; border: none;
+      border-radius: 4px; font-family: 'IBM Plex Sans', sans-serif; font-size: 15px;
+      font-weight: 600; cursor: pointer; display: flex; align-items: center;
+      justify-content: center; gap: 8px; transition: background 0.2s;
+    }
+    #btn-generate:hover { background: #2a2a4e; }
+    #btn-generate:disabled { opacity: 0.5; cursor: not-allowed; }
+    .arrow { transition: transform 0.2s; }
+    #btn-generate:hover .arrow { transform: translateX(3px); }
+    #error-box {
+      display: none; margin-top: 16px; padding: 12px 14px; border-radius: 4px;
+      background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; font-size: 13px;
+    }
+
+    /* ─── LOADING ─── */
+    #loading {
+      min-height: 100vh; flex-direction: column; align-items: center; justify-content: center;
+      gap: 32px; background: #ffffff; padding: 40px 20px;
+    }
+    .spinner {
+      width: 40px; height: 40px; border: 3px solid #eee; border-top-color: var(--gold);
+      border-radius: 50%; animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #loading-name { font-family: 'Playfair Display', serif; font-size: 20px; font-weight: 600; color: var(--navy); }
+    #loading-status { font-size: 13px; color: var(--mid-gray); min-height: 18px; }
+    .steps { display: flex; flex-direction: column; gap: 12px; margin-top: 8px; }
+    .step {
+      display: flex; align-items: center; gap: 10px; font-size: 13px; color: #ccc;
+      transition: color 0.4s;
+    }
+    .step .dot { width: 8px; height: 8px; border-radius: 50%; background: #ddd; transition: background 0.4s; flex-shrink: 0; }
+    .step.active { color: var(--navy); }
+    .step.active .dot { background: var(--gold); }
+    .step.done { color: var(--mid-gray); }
+    .step.done .dot { background: #22c55e; }
+
+    /* ─── REPORT ─── */
+    #report-screen { flex-direction: column; height: 100vh; }
+    .toolbar {
+      display: flex; align-items: center; gap: 16px; padding: 10px 20px;
+      background: var(--navy); color: white; flex-shrink: 0;
+    }
+    .tb-brand { font-family: 'Playfair Display', serif; font-size: 15px; font-weight: 600; white-space: nowrap; }
+    .tb-sep { color: var(--gold); margin: 0 4px; }
+    .tb-sub { font-family: 'IBM Plex Sans', sans-serif; font-size: 11px; font-weight: 400; letter-spacing: 0.08em; text-transform: uppercase; color: var(--gold-light); }
+    #tb-company { font-size: 13px; color: rgba(255,255,255,0.7); flex: 1; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .tb-actions { display: flex; gap: 8px; }
+    .tb-btn {
+      padding: 6px 14px; border: 1px solid rgba(255,255,255,0.25); background: transparent;
+      color: white; border-radius: 3px; font-size: 12px; cursor: pointer;
+      font-family: 'IBM Plex Sans', sans-serif; transition: background 0.2s;
+    }
+    .tb-btn:hover { background: rgba(255,255,255,0.1); }
+    #report-frame { flex: 1; border: none; width: 100%; background: white; }
+
+    /* ─── SHARE TOAST ─── */
+    .share-toast {
+      position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(80px);
+      background: var(--navy); color: white; padding: 10px 20px; border-radius: 6px;
+      font-size: 13px; opacity: 0; transition: all 0.3s ease; pointer-events: none; z-index: 999;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.2);
+    }
+    .share-toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  </style>
+</head>
+<body>
+
+<!-- ══════════ LANDING ══════════ -->
+<div id="landing" class="screen active">
+  <div class="brand-mark">
+    <svg viewBox="0 0 22 22" fill="none" width="48" height="48">
+      <rect x="1" y="1" width="20" height="20" stroke="#AD9551" stroke-width="1.5"/>
+      <path d="M4 17L8.5 8L13 14L16 10L18 17H4Z" fill="#AD9551" opacity="0.85"/>
+    </svg>
+  </div>
+  <div class="brand-name">TFG Family Investment Research</div>
+  <div class="brand-sub">Equity Research Generator</div>
+
+  <div class="input-card">
+    <div class="data-badge"><span class="dot"></span>Powered by Financial Modeling Prep + Claude</div>
+    <div class="field">
+      <label for="ticker">Company Name or Ticker Symbol</label>
+      <input type="text" id="ticker" placeholder="e.g.  AAPL,  MSFT,  CSU.TO,  Oracle…" autocomplete="off" spellcheck="false" />
+    </div>
+    <button id="btn-generate">
+      Generate Research Report <span class="arrow">→</span>
+    </button>
+    <div id="error-box"></div>
+  </div>
+</div>
+
+<!-- ══════════ LOADING ══════════ -->
+<div id="loading" class="screen">
+  <div style="display:flex;align-items:center;gap:12px;">
+    <div class="brand-mark" style="width:36px;height:36px;">
+      <svg viewBox="0 0 22 22" fill="none" width="36" height="36">
+        <rect x="1" y="1" width="20" height="20" stroke="#AD9551" stroke-width="1.5"/>
+        <path d="M4 17L8.5 8L13 14L16 10L18 17H4Z" fill="#AD9551" opacity="0.85"/>
+      </svg>
+    </div>
+    <span style="font-family:'Playfair Display',serif;font-size:16px;font-weight:600;color:#1a1a2e;">TFG Family Investment Research</span>
+  </div>
+  <div style="display:flex;flex-direction:column;align-items:center;gap:20px;">
+    <div class="spinner"></div>
+    <div id="loading-name"></div>
+    <div id="loading-status">Initializing…</div>
+  </div>
+  <div class="steps">
+    <div class="step" id="s1"><div class="dot"></div>Pulling FMP financial data &amp; market context</div>
+    <div class="step" id="s2"><div class="dot"></div>Building segment analysis &amp; comps</div>
+    <div class="step" id="s3"><div class="dot"></div>Generating charts &amp; financial tables</div>
+    <div class="step" id="s4"><div class="dot"></div>Writing analyst narrative</div>
+    <div class="step" id="s5"><div class="dot"></div>Rendering final report</div>
+  </div>
+</div>
+
+<!-- ══════════ REPORT ══════════ -->
+<div id="report-screen" class="screen">
+  <div class="toolbar">
+    <div class="tb-brand">
+      TFG Family Investment Research
+      <span class="tb-sep">|</span>
+      <span class="tb-sub">Equity Research</span>
+    </div>
+    <div id="tb-company"></div>
+    <div class="tb-actions">
+      <button class="tb-btn" id="btn-back">← New Report</button>
+      <button class="tb-btn" id="btn-print">Print / PDF</button>
+    </div>
+  </div>
+  <iframe id="report-frame" title="Equity Research Report"></iframe>
+</div>
+
+<div class="share-toast" id="share-toast">Link copied to clipboard</div>
+
+<script>
+  var g = function(id) { return document.getElementById(id); };
+
+  /* ── Screen management ── */
+  function showScreen(id) {
+    document.querySelectorAll('.screen').forEach(function(s) { s.classList.remove('active'); });
+    g(id).classList.add('active');
+  }
+
+  function showError(msg) {
+    var box = g('error-box');
+    box.textContent = msg;
+    box.style.display = 'block';
+  }
+  function clearError() { g('error-box').style.display = 'none'; }
+
+  /* ── Loading steps ── */
+  var STEPS = ['s1','s2','s3','s4','s5'];
+  var stepTimer = null;
+  function startSteps() {
+    STEPS.forEach(function(id) { g(id).className = 'step'; });
+    var i = 0;
+    stepTimer = setInterval(function() {
+      if (i > 0) g(STEPS[i-1]).className = 'step done';
+      if (i < STEPS.length) { g(STEPS[i]).className = 'step active'; i++; }
+      else clearInterval(stepTimer);
+    }, 3200);
+  }
+  function stopSteps() { clearInterval(stepTimer); STEPS.forEach(function(id) { g(id).className = 'step done'; }); }
+  function resetSteps() { clearInterval(stepTimer); STEPS.forEach(function(id) { g(id).className = 'step'; }); }
+
+  /* ── API call ── */
+  async function callAPI(query) {
+    var res = await fetch('/api/research', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: query })
+    });
+    var data;
+    try { data = await res.json(); } catch(e) { throw new Error('Could not parse server response (HTTP ' + res.status + ')'); }
+    if (!res.ok) throw new Error(data.error || 'Server error HTTP ' + res.status);
+    if (!data.html) throw new Error('Server returned no report content.');
+    return data.html;
+  }
+
+  /* ── Generate handler ── */
+  g('btn-generate').addEventListener('click', async function() {
+    var query = g('ticker').value.trim();
+    var btn = g('btn-generate');
+    clearError();
+    if (!query) return showError('Please enter a company name or ticker symbol.');
+
+    btn.disabled = true;
+    g('loading-name').textContent = query.toUpperCase();
+    g('loading-status').textContent = 'Fetching data from FMP…';
+    showScreen('loading');
+    startSteps();
+
+    try {
+      var html = await callAPI(query);
+      stopSteps();
+      g('loading-status').textContent = 'Done!';
+
+      // Show report
+      g('tb-company').textContent = query.toUpperCase();
+      showScreen('report-screen');
+      var frame = g('report-frame');
+      frame.srcdoc = html;
+
+      // Update URL for sharing
+      var url = new URL(window.location);
+      url.searchParams.set('ticker', query.toUpperCase());
+      history.pushState({ ticker: query }, '', url);
+
+    } catch(err) {
+      showScreen('landing');
+      resetSteps();
+      showError(err.message);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  /* ── Enter key ── */
+  g('ticker').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') g('btn-generate').click();
+  });
+
+  /* ── Back button ── */
+  g('btn-back').addEventListener('click', function() {
+    showScreen('landing');
+    resetSteps();
+    var url = new URL(window.location);
+    url.searchParams.delete('ticker');
+    history.pushState({}, '', url);
+  });
+
+  /* ── Print ── */
+  g('btn-print').addEventListener('click', function() {
+    var frame = g('report-frame');
+    if (frame.contentWindow) frame.contentWindow.print();
+  });
+
+  /* ── Popstate (back/forward) ── */
+  window.addEventListener('popstate', function(e) {
+    var params = new URLSearchParams(window.location.search);
+    var t = params.get('ticker');
+    if (t) {
+      g('ticker').value = t;
+      g('btn-generate').click();
+    } else {
+      showScreen('landing');
+      resetSteps();
+    }
+  });
+
+  /* ── Auto-load from URL param ── */
+  (function() {
+    var params = new URLSearchParams(window.location.search);
+    var t = params.get('ticker');
+    if (t) {
+      g('ticker').value = t;
+      g('btn-generate').click();
+    }
+  })();
+</script>
+</body>
+</html>

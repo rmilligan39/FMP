@@ -1,0 +1,10 @@
+{
+  "functions": {
+    "api/research.js": {
+      "maxDuration": 300
+    }
+  },
+  "rewrites": [
+    { "source": "/api/research", "destination": "/api/research.js" }
+  ]
+}
