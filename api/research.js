@@ -308,6 +308,8 @@ function buildPrompt(query, metrics) {
   let tableData = '';
   if (metrics) {
     tableData = `\n\n══════ PRE-FETCHED FINANCIAL DATA (from Financial Modeling Prep) ══════\n`;
+    tableData += `Data retrieved: ${new Date().toISOString().slice(0, 10)}\n`;
+    tableData += `Most recent fiscal year in data: ${metrics.fullYears[metrics.fullYears.length - 1] || 'unknown'}\n`;
     tableData += `Company: ${metrics.companyName} (${metrics.ticker})\n`;
     tableData += `Exchange: ${metrics.exchange} | Sector: ${metrics.sector} | Industry: ${metrics.industry}\n`;
     tableData += `Price: ${metrics.price} | Trailing P/E: ${metrics.trailingPE} | Forward P/E: ${metrics.forwardPE}\n`;
@@ -344,7 +346,13 @@ function buildPrompt(query, metrics) {
     tableData += `USE THIS DATA to populate all tables, charts, and metrics in the report. Fill in estimate (E) columns using the analyst consensus data above. Where data gaps exist, use your training knowledge to fill reasonable estimates and flag with (E). For the "Good for What?!?" section, provide opinionated analysis.\n`;
   }
 
+  const today = new Date();
+  const todayStr = today.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+  const todayISO = today.toISOString().slice(0, 10);
+
   const promptBody = `You are a senior equity analyst at The Fedeli Group. Produce a complete, self-contained HTML equity research report for: "${query}".
+
+IMPORTANT: Today's date is ${todayStr} (${todayISO}). Use this as the report date. All "as of" dates, analyst signature dates, and data freshness references must reflect this date. Do NOT use any other date.
 
 CRITICAL OUTPUT RULE: Return ONLY valid HTML. Your entire response must begin with <!DOCTYPE html> and end with </html>. Do not output markdown code fences, backticks, or any text outside the HTML document.
 
@@ -409,7 +417,7 @@ SECTION 3 — HISTORICAL VALUATION CHARTS
 ════════════════════════════════════
 Three side-by-side Chart.js panels in a CSS grid (1fr 1fr 1fr).
 Header bar: "Historical Absolute & Relative Valuation — Forward P/E | Price / FCF | Forward EV/EBITDA vs. S&P 500"
-Source line: "Source: FMP, Company Filings, TFG Research | As of [date]"
+Source line: "Source: FMP, Company Filings, TFG Research | As of ${todayStr}"
 
 Each panel:
 - Title: "Historical [Metric] Relative to the S&P 500"
@@ -463,7 +471,7 @@ SECTION 4 — ANALYST NARRATIVE
 P1 Recent Results: recurring vs one-time, margins, FCF quality, balance sheet flags.
 P2 Outlook: 2-3 value drivers next 12-24 months, one specific upside catalyst, one specific downside risk.
 P3 Rating (BUY/HOLD/SELL), 12-month price target, exact multiple e.g. "22x FY26E EPS of $4.85", single condition that changes the rating.
-<p class="analyst-sig">TFG Family Investment Research | Report Date: [today's date] | Next Expected Earnings: [date]</p>
+<p class="analyst-sig">TFG Family Investment Research | Report Date: ${todayStr} | Next Expected Earnings: [look up next earnings date]</p>
 
 ════════════════════════════════════
 SECTION 5 — GOOD FOR WHAT?!?
