@@ -18,7 +18,22 @@ function fmpGet(path) {
       let body = '';
       res.on('data', d => body += d);
       res.on('end', () => {
-        try { resolve(JSON.parse(body)); }
+        // Handle HTTP errors — resolve with empty array/object so Promise.all doesn't abort
+        if (res.statusCode >= 400) {
+          console.error(`[FMP] HTTP ${res.statusCode} on ${path}: ${body.slice(0,150)}`);
+          resolve([]);
+          return;
+        }
+        try {
+          const parsed = JSON.parse(body);
+          // FMP sometimes returns {"Error Message":"..."} on valid 200 responses
+          if (parsed && parsed['Error Message']) {
+            console.error(`[FMP] API error on ${path}: ${parsed['Error Message']}`);
+            resolve([]);
+            return;
+          }
+          resolve(parsed);
+        }
         catch (e) { reject(new Error(`FMP parse error on ${path}: ${body.slice(0,200)}`)); }
       });
       res.on('error', reject);
@@ -67,7 +82,7 @@ async function fetchFMPData(ticker) {
   const [profileArr, quoteArr, incomeArr, balanceArr, cashFlowArr, keyMetricsArr,
          ratiosArr, estimatesArr, priceHistory, dividendArr, spyProfile] = await Promise.all([
     fmpGet(`/stable/profile?symbol=${T}`),
-    fmpGet(`/stable/quote?symbol=${T}`),
+    fmpGet(`/stable/batch-quote-short?symbols=${T}`),
     fmpGet(`/stable/income-statement?symbol=${T}&limit=7`),
     fmpGet(`/stable/balance-sheet-statement?symbol=${T}&limit=7`),
     fmpGet(`/stable/cash-flow-statement?symbol=${T}&limit=7`),
