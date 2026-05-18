@@ -159,8 +159,9 @@ function computeMetrics(data) {
   for (let idx = 0; idx < inc.length; idx++) {
     const i = inc[idx];
     const fy = fullYears[idx];
-    const b = bal[idx] || {};
-    const c = cf[idx]  || {};
+    // Match balance sheet and cash flow by fiscal year, not by positional index
+    const b = bal.find(x => (x.calendarYear || new Date(x.date).getFullYear().toString()) === fy) || {};
+    const c = cf.find(x => (x.calendarYear || new Date(x.date).getFullYear().toString()) === fy) || {};
     const k = km[idx]  || {};
     const r = rat[idx]  || {};
 
@@ -184,7 +185,7 @@ function computeMetrics(data) {
 
     // Dividends for this year
     const yearDivs = divHist.filter(d => new Date(d.date).getFullYear().toString() === fy);
-    const annualDiv = yearDivs.reduce((s, d) => s + (d.dividend || d.adjDividend || 0), 0);
+    const annualDiv = yearDivs.reduce((s, d) => s + (d.dividend || d.adjDividend || d.amount || d.dividendAmount || 0), 0);
 
     // Annual high/low price for P/E
     const yearPrices = (data.priceHist || []).filter(p => {
@@ -228,17 +229,29 @@ function computeMetrics(data) {
     rows['All Dist. to Net Profit (%)'].push(payoutRatio != null ? fmt(payoutRatio * 100, 1) : '—');
   }
 
-  // Price highs/lows per year
+  // Price highs/lows per year — use actual high/low fields from EOD data
   const priceRanges = {};
   fullYears.forEach(fy => {
     const yp = (data.priceHist || []).filter(p => new Date(p.date).getFullYear().toString() === fy);
     if (yp.length > 0) {
       priceRanges[fy] = {
-        high: Math.max(...yp.map(p => p.close)),
-        low:  Math.min(...yp.map(p => p.close)),
+        high: Math.max(...yp.map(p => p.high || p.close)),
+        low:  Math.min(...yp.map(p => p.low || p.close)),
       };
     }
   });
+
+  // Also compute current year price range (may not have a fiscal year entry yet)
+  const currentYear = new Date().getFullYear().toString();
+  if (!priceRanges[currentYear]) {
+    const cyp = (data.priceHist || []).filter(p => new Date(p.date).getFullYear().toString() === currentYear);
+    if (cyp.length > 0) {
+      priceRanges[currentYear] = {
+        high: Math.max(...cyp.map(p => p.high || p.close)),
+        low:  Math.min(...cyp.map(p => p.low || p.close)),
+      };
+    }
+  }
 
   // Analyst estimates for forward years
   const sortedEst = [...estimates].sort((a, b) => new Date(a.date) - new Date(b.date));
@@ -262,9 +275,10 @@ function computeMetrics(data) {
        : `$${(profile.mktCap / 1e6).toFixed(0)}M`)
     : '—';
 
-  // EV/EBITDA
+  // EV/EBITDA — use sorted balance sheet for most recent year
+  const latestBal = bal.length > 0 ? bal[bal.length - 1] : {};
   const ev = (profile.mktCap || 0) +
-    (balance.length > 0 ? (balance[0].longTermDebt || 0) - (balance[0].cashAndCashEquivalents || 0) : 0);
+    (latestBal.longTermDebt || 0) - (latestBal.cashAndCashEquivalents || latestBal.cashAndShortTermInvestments || 0);
   const ttmEbitda = inc.length > 0 ? inc[inc.length - 1].ebitda : null;
   const evEbitdaTTM = ttmEbitda && ttmEbitda > 0 ? (ev / ttmEbitda).toFixed(1) : '—';
 
@@ -337,6 +351,12 @@ function buildPrompt(query, metrics) {
       const pr = metrics.priceRanges[fy];
       if (pr) tableData += `  ${fy}: H $${pr.high.toFixed(2)} / L $${pr.low.toFixed(2)}\n`;
     });
+    // Include current year if not already in fullYears
+    const cy = new Date().getFullYear().toString();
+    if (!metrics.fullYears.includes(cy) && metrics.priceRanges[cy]) {
+      const pr = metrics.priceRanges[cy];
+      tableData += `  ${cy} YTD: H $${pr.high.toFixed(2)} / L $${pr.low.toFixed(2)}\n`;
+    }
 
     // Financial table
     tableData += `\nFinancial Table (columns: ${metrics.years.join(' | ')}):\n`;
