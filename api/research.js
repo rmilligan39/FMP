@@ -64,9 +64,10 @@ async function fetchFMPData(ticker) {
   const T = ticker.toUpperCase();
 
   // Parallel fetch all endpoints — using /stable/ query-param format (not legacy /api/v3/ path format)
-  const [profileArr, incomeArr, balanceArr, cashFlowArr, keyMetricsArr,
+  const [profileArr, quoteArr, incomeArr, balanceArr, cashFlowArr, keyMetricsArr,
          ratiosArr, estimatesArr, priceHistory, dividendArr, spyProfile] = await Promise.all([
     fmpGet(`/stable/profile?symbol=${T}`),
+    fmpGet(`/stable/quote?symbol=${T}`),
     fmpGet(`/stable/income-statement?symbol=${T}&limit=7`),
     fmpGet(`/stable/balance-sheet-statement?symbol=${T}&limit=7`),
     fmpGet(`/stable/cash-flow-statement?symbol=${T}&limit=7`),
@@ -83,6 +84,16 @@ async function fetchFMPData(ticker) {
   if (!profile.companyName && !profile.symbol) {
     return null; // ticker not found
   }
+
+  // Overlay real-time quote data onto profile (quote has live price, mktCap, volume)
+  const quote = (Array.isArray(quoteArr) ? quoteArr[0] : quoteArr) || {};
+  if (quote.price) {
+    profile.price = quote.price;
+    console.log(`[TFG Research] Live quote price for ${T}: $${quote.price}`);
+  }
+  if (quote.marketCap) profile.mktCap = quote.marketCap;
+  if (quote.pe) profile.pe = quote.pe;
+  if (quote.eps) profile.eps = quote.eps;
 
   const income    = Array.isArray(incomeArr)    ? incomeArr    : [];
   const balance   = Array.isArray(balanceArr)   ? balanceArr   : [];
