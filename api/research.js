@@ -63,19 +63,19 @@ function anthropicPost(payload) {
 async function fetchFMPData(ticker) {
   const T = ticker.toUpperCase();
 
-  // Parallel fetch all endpoints
+  // Parallel fetch all endpoints — using /stable/ query-param format (not legacy /api/v3/ path format)
   const [profileArr, incomeArr, balanceArr, cashFlowArr, keyMetricsArr,
          ratiosArr, estimatesArr, priceHistory, dividendArr, spyProfile] = await Promise.all([
-    fmpGet(`/api/v3/profile/${T}`),
-    fmpGet(`/api/v3/income-statement/${T}?limit=7`),
-    fmpGet(`/api/v3/balance-sheet-statement/${T}?limit=7`),
-    fmpGet(`/api/v3/cash-flow-statement/${T}?limit=7`),
-    fmpGet(`/api/v3/key-metrics/${T}?limit=7`),
-    fmpGet(`/api/v3/ratios/${T}?limit=7`),
-    fmpGet(`/api/v3/analyst-estimates/${T}?limit=3`),
-    fmpGet(`/api/v3/historical-price-full/${T}?serietype=line`),
-    fmpGet(`/api/v3/historical-price-full/stock_dividend/${T}`),
-    fmpGet(`/api/v3/profile/SPY`),
+    fmpGet(`/stable/profile?symbol=${T}`),
+    fmpGet(`/stable/income-statement?symbol=${T}&limit=7`),
+    fmpGet(`/stable/balance-sheet-statement?symbol=${T}&limit=7`),
+    fmpGet(`/stable/cash-flow-statement?symbol=${T}&limit=7`),
+    fmpGet(`/stable/key-metrics?symbol=${T}&limit=7`),
+    fmpGet(`/stable/ratios?symbol=${T}&limit=7`),
+    fmpGet(`/stable/analyst-estimates?symbol=${T}&limit=3`),
+    fmpGet(`/stable/historical-price-eod/full?symbol=${T}`),
+    fmpGet(`/stable/historical-price-eod/dividend?symbol=${T}`),
+    fmpGet(`/stable/profile?symbol=SPY`),
   ]);
 
   const profile = (Array.isArray(profileArr) ? profileArr[0] : profileArr) || {};
@@ -90,8 +90,11 @@ async function fetchFMPData(ticker) {
   const keyMetr   = Array.isArray(keyMetricsArr)? keyMetricsArr: [];
   const ratios    = Array.isArray(ratiosArr)    ? ratiosArr    : [];
   const estimates = Array.isArray(estimatesArr) ? estimatesArr : [];
-  const priceHist = priceHistory && priceHistory.historical ? priceHistory.historical : [];
-  const divHist   = dividendArr && dividendArr.historical ? dividendArr.historical : [];
+  // /stable/ may return flat array OR {historical:[...]} wrapper — handle both
+  const priceHist = Array.isArray(priceHistory) ? priceHistory
+    : (priceHistory && priceHistory.historical ? priceHistory.historical : []);
+  const divHist = Array.isArray(dividendArr) ? dividendArr
+    : (dividendArr && dividendArr.historical ? dividendArr.historical : []);
 
   return { profile, income, balance, cashFlow, keyMetr, ratios, estimates, priceHist, divHist, ticker: T };
 }
