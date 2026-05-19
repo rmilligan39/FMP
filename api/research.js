@@ -80,7 +80,7 @@ async function fetchFMPData(ticker) {
 
   // Parallel fetch all endpoints — using /stable/ query-param format (not legacy /api/v3/ path format)
   const [profileArr, quoteArr, incomeArr, balanceArr, cashFlowArr, keyMetricsArr,
-         ratiosArr, estimatesArr, priceHistory, dividendArr, spyProfile] = await Promise.all([
+         ratiosArr, estimatesArr, priceHistory, dividendArr, spyProfile, incomeQtrArr] = await Promise.all([
     fmpGet(`/stable/profile?symbol=${T}`),
     fmpGet(`/stable/batch-quote-short?symbols=${T}`),
     fmpGet(`/stable/income-statement?symbol=${T}&limit=7`),
@@ -92,6 +92,7 @@ async function fetchFMPData(ticker) {
     fmpGet(`/stable/historical-price-eod/full?symbol=${T}`),
     fmpGet(`/stable/historical-price-eod/dividend?symbol=${T}`),
     fmpGet(`/stable/profile?symbol=SPY`),
+    fmpGet(`/stable/income-statement?symbol=${T}&period=quarter&limit=1`),
   ]);
 
   const profile = (Array.isArray(profileArr) ? profileArr[0] : profileArr) || {};
@@ -121,15 +122,17 @@ async function fetchFMPData(ticker) {
     : (priceHistory && priceHistory.historical ? priceHistory.historical : []);
   const divHist = Array.isArray(dividendArr) ? dividendArr
     : (dividendArr && dividendArr.historical ? dividendArr.historical : []);
+  // Most recent quarterly income statement — for current share count
+  const incomeQtr = Array.isArray(incomeQtrArr) ? incomeQtrArr : [];
 
-  return { profile, income, balance, cashFlow, keyMetr, ratios, estimates, priceHist, divHist, ticker: T };
+  return { profile, income, balance, cashFlow, keyMetr, ratios, estimates, priceHist, divHist, incomeQtr, ticker: T };
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
    NORMALIZE FMP DATA → METRICS BLOCK FOR PROMPT
    ═══════════════════════════════════════════════════════════════════════════ */
 function computeMetrics(data) {
-  const { profile, income, balance, cashFlow, keyMetr, ratios, estimates, priceHist, divHist, ticker } = data;
+  const { profile, income, balance, cashFlow, keyMetr, ratios, estimates, priceHist, divHist, incomeQtr, ticker } = data;
 
   // Sort financials by date ascending (oldest first)
   const sortByDate = arr => [...arr].sort((a, b) => new Date(a.date) - new Date(b.date));
@@ -313,6 +316,24 @@ function computeMetrics(data) {
   const pegRatio = epsGrowth && epsGrowth > 2 && forwardPE !== '—'
     ? (parseFloat(forwardPE) / epsGrowth).toFixed(2) : 'N/M';
 
+  // Current shares outstanding — best available source:
+  // 1. Most recent quarterly income statement (weightedAverageShsOutDil)
+  // 2. Market cap / live price (derived)
+  // 3. Most recent annual income statement
+  let currentSharesOut = null;
+  const qtr = incomeQtr && incomeQtr.length > 0 ? incomeQtr[0] : null;
+  if (qtr && (qtr.weightedAverageShsOutDil || qtr.weightedAverageShsOut)) {
+    currentSharesOut = qtr.weightedAverageShsOutDil || qtr.weightedAverageShsOut;
+    console.log(`[TFG Research] Shares from Q${qtr.period || '?'} ${qtr.calendarYear || ''}: ${(currentSharesOut / 1e6).toFixed(1)}M`);
+  } else if (profile.mktCap && profile.price && profile.price > 0) {
+    currentSharesOut = profile.mktCap / profile.price;
+    console.log(`[TFG Research] Shares from mktCap/price: ${(currentSharesOut / 1e6).toFixed(1)}M`);
+  } else if (inc.length > 0) {
+    const lastInc = inc[inc.length - 1];
+    currentSharesOut = lastInc.weightedAverageShsOutDil || lastInc.weightedAverageShsOut;
+  }
+  const currentSharesM = currentSharesOut ? (currentSharesOut / 1e6).toFixed(1) : '—';
+
   return {
     ticker,
     companyName: profile.companyName || ticker,
@@ -332,6 +353,7 @@ function computeMetrics(data) {
     evEbitdaFwd1,
     evEbitdaFwd2,
     pegRatio,
+    currentSharesM,
     years,
     fullYears,
     rows,
@@ -355,6 +377,7 @@ function buildPrompt(query, metrics) {
     tableData += `Price: ${metrics.price} | Trailing P/E: ${metrics.trailingPE} | Forward P/E: ${metrics.forwardPE}\n`;
     tableData += `Dividend Yield: ${metrics.divYield} | Market Cap: ${metrics.marketCap} | Beta: ${metrics.beta}\n`;
     tableData += `EV/EBITDA (TTM): ${metrics.evEbitdaTTM} | EV/EBITDA +1 Yr (E): ${metrics.evEbitdaFwd1} | EV/EBITDA +2 Yr (E): ${metrics.evEbitdaFwd2} | PEG: ${metrics.pegRatio}\n`;
+    tableData += `Current Shares Outstanding: ${metrics.currentSharesM}M (most recent available — use this for the current/estimate year columns, NOT the historical weighted average)\n`;
 
     if (metrics.description) {
       tableData += `\nBusiness Description: ${metrics.description.slice(0, 600)}...\n`;
