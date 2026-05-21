@@ -174,16 +174,27 @@ function computeMetrics(data) {
 
   // Current shares outstanding — best available source:
   // 1. Most recent quarterly income statement (weightedAverageShsOutDil)
-  // 2. Market cap / live price (derived)
-  // 3. Most recent annual income statement
+  // 2. Most recent annual income statement (weightedAverageShsOutDil)
+  // 3. Profile mktCap / live price (ONLY if both are from the same snapshot — unreliable as fallback)
   let currentSharesOut = null;
+  let sharesSource = 'none';
   const qtr = (data.incomeQtr && data.incomeQtr.length > 0) ? data.incomeQtr[0] : null;
   if (qtr && (qtr.weightedAverageShsOutDil || qtr.weightedAverageShsOut)) {
     currentSharesOut = qtr.weightedAverageShsOutDil || qtr.weightedAverageShsOut;
-    console.log(`[TFG Research] Shares from quarterly filing: ${(currentSharesOut / 1e6).toFixed(1)}M`);
-  } else if (profile.mktCap && profile.price && profile.price > 0) {
-    currentSharesOut = profile.mktCap / profile.price;
-    console.log(`[TFG Research] Shares from mktCap/price: ${(currentSharesOut / 1e6).toFixed(1)}M`);
+    sharesSource = `Q${qtr.period || '?'} ${qtr.calendarYear || qtr.date || ''}`;
+    console.log(`[TFG Research] Shares from quarterly filing (${sharesSource}): ${(currentSharesOut / 1e6).toFixed(1)}M`);
+  } else if (inc.length > 0) {
+    const lastInc = inc[inc.length - 1];
+    currentSharesOut = lastInc.weightedAverageShsOutDil || lastInc.weightedAverageShsOut;
+    sharesSource = `FY annual`;
+    if (currentSharesOut) console.log(`[TFG Research] Shares from annual filing: ${(currentSharesOut / 1e6).toFixed(1)}M`);
+  }
+
+  // Recompute market cap from live price × current shares (profile.mktCap is often stale)
+  if (currentSharesOut && profile.price && profile.price > 0) {
+    const liveMktCap = profile.price * currentSharesOut;
+    console.log(`[TFG Research] Market cap override: $${(liveMktCap / 1e9).toFixed(2)}B (was $${((profile.mktCap || 0) / 1e9).toFixed(2)}B from profile)`);
+    profile.mktCap = liveMktCap;
   }
 
   const fullYears = inc.map(i => i.calendarYear || new Date(i.date).getFullYear().toString());
@@ -197,11 +208,11 @@ function computeMetrics(data) {
     const k = km[idx]  || {};
     const r = rat[idx]  || {};
 
-    // For the most recent year, use current shares if available (quarterly filing or mktCap/price)
+    // For the most recent year, use current shares if available (quarterly filing or recomputed)
     const isLastYear = (idx === inc.length - 1);
     const shares = isLastYear && currentSharesOut
       ? currentSharesOut
-      : (i.weightedAverageShsOutDil || i.weightedAverageShsOut || (profile.mktCap && profile.price ? profile.mktCap / profile.price : null)) || null;
+      : (i.weightedAverageShsOutDil || i.weightedAverageShsOut) || null;
     const sharesM = shares ? shares / 1e6 : null;
     const revenue = i.revenue || 0;
     const netIncome = i.netIncome || 0;
