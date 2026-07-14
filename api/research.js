@@ -73,16 +73,53 @@ function anthropicPost(payload) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+   LIVE PRICE — tries multiple FMP quote endpoints in order, since any single
+   one can fail on a given plan/moment (rate limit, tier gating, transient
+   error). Only a genuinely successful, positive price from one of these is
+   trusted as "live." Everything else falls back to the profile snapshot,
+   and that fallback gets flagged rather than presented as current.
+   ═══════════════════════════════════════════════════════════════════════════ */
+async function fetchLivePrice(T) {
+  const attempts = [
+    { name: 'quote',             path: `/stable/quote?symbol=${T}` },
+    { name: 'batch-quote-short', path: `/stable/batch-quote-short?symbols=${T}` },
+    { name: 'quote-short',       path: `/stable/quote-short?symbol=${T}` },
+  ];
+
+  for (const attempt of attempts) {
+    try {
+      const result = await fmpGet(attempt.path);
+      const row = Array.isArray(result) ? result[0] : result;
+      if (row && row.price && isFinite(row.price) && row.price > 0) {
+        console.log(`[TFG Research] Live price for ${T} confirmed via ${attempt.name}: $${row.price}`);
+        return {
+          price: row.price,
+          marketCap: row.marketCap || null,
+          pe: row.pe || null,
+          eps: row.eps || null,
+          source: attempt.name,
+          timestamp: row.timestamp || row.date || null,
+        };
+      }
+    } catch (e) {
+      console.error(`[TFG Research] Live price attempt "${attempt.name}" failed for ${T}: ${e.message}`);
+    }
+  }
+  console.error(`[TFG Research] WARNING: no quote endpoint returned a confirmed live price for ${T}. Will fall back to profile snapshot price if available.`);
+  return null;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
    FETCH ALL DATA FROM FMP
    ═══════════════════════════════════════════════════════════════════════════ */
 async function fetchFMPData(ticker) {
   const T = ticker.toUpperCase();
 
   // Parallel fetch all endpoints — using /stable/ query-param format (not legacy /api/v3/ path format)
-  const [profileArr, quoteArr, incomeArr, balanceArr, cashFlowArr, keyMetricsArr,
+  const [profileArr, liveQuote, incomeArr, balanceArr, cashFlowArr, keyMetricsArr,
          ratiosArr, estimatesArr, priceHistory, dividendArr, spyProfile, incomeQtrArr] = await Promise.all([
     fmpGet(`/stable/profile?symbol=${T}`),
-    fmpGet(`/stable/batch-quote-short?symbols=${T}`),
+    fetchLivePrice(T),
     fmpGet(`/stable/income-statement?symbol=${T}&limit=7`),
     fmpGet(`/stable/balance-sheet-statement?symbol=${T}&limit=7`),
     fmpGet(`/stable/cash-flow-statement?symbol=${T}&limit=7`),
@@ -101,15 +138,27 @@ async function fetchFMPData(ticker) {
     return null; // ticker not found
   }
 
-  // Overlay real-time quote data onto profile (quote has live price, mktCap, volume)
-  const quote = (Array.isArray(quoteArr) ? quoteArr[0] : quoteArr) || {};
-  if (quote.price) {
-    profile.price = quote.price;
-    console.log(`[TFG Research] Live quote price for ${T}: $${quote.price}`);
+  // Overlay confirmed live quote data onto profile (has live price, mktCap, volume).
+  // If no endpoint could confirm a live price, keep whatever profile.price already
+  // held (a company-profile snapshot) but mark it explicitly as unconfirmed so
+  // downstream code can flag it instead of presenting it as current.
+  const snapshotPrice = profile.price || null;
+  if (liveQuote && liveQuote.price) {
+    profile.price = liveQuote.price;
+    profile.priceIsLive = true;
+    profile.priceSource = liveQuote.source;
+    if (liveQuote.marketCap) profile.mktCap = liveQuote.marketCap;
+    if (liveQuote.pe) profile.pe = liveQuote.pe;
+    if (liveQuote.eps) profile.eps = liveQuote.eps;
+
+    if (snapshotPrice && Math.abs(snapshotPrice - liveQuote.price) / liveQuote.price > 0.15) {
+      console.error(`[TFG Research] PRICE DIVERGENCE for ${T}: profile snapshot $${snapshotPrice} vs confirmed live quote $${liveQuote.price} (>15% apart, via ${liveQuote.source}). Using the live quote — but this gap is worth a manual look if it recurs.`);
+    }
+  } else {
+    profile.priceIsLive = false;
+    profile.priceSource = snapshotPrice ? 'profile-snapshot' : 'none';
+    console.error(`[TFG Research] Using UNCONFIRMED price for ${T}: $${snapshotPrice || 'none'} (profile snapshot, not a live quote). Report will be flagged accordingly.`);
   }
-  if (quote.marketCap) profile.mktCap = quote.marketCap;
-  if (quote.pe) profile.pe = quote.pe;
-  if (quote.eps) profile.eps = quote.eps;
 
   const income    = Array.isArray(incomeArr)    ? incomeArr    : [];
   const balance   = Array.isArray(balanceArr)   ? balanceArr   : [];
@@ -398,6 +447,8 @@ function computeMetrics(data) {
     ceo: profile.ceo || '',
     website: profile.website || '',
     price: profile.price ? `$${profile.price.toFixed(2)}` : '—',
+    priceIsLive: profile.priceIsLive === true,
+    priceSource: profile.priceSource || 'none',
     trailingPE,
     forwardPE,
     divYield: divYieldCurrent,
@@ -429,6 +480,9 @@ function buildPrompt(query, metrics) {
     tableData += `Company: ${metrics.companyName} (${metrics.ticker})\n`;
     tableData += `Exchange: ${metrics.exchange} | Sector: ${metrics.sector} | Industry: ${metrics.industry}\n`;
     tableData += `Price: ${metrics.price} | Trailing P/E: ${metrics.trailingPE} | Forward P/E: ${metrics.forwardPE}\n`;
+    if (!metrics.priceIsLive) {
+      tableData += `⚠ PRICE NOT CONFIRMED LIVE (source: ${metrics.priceSource}): No quote endpoint (quote / batch-quote-short / quote-short) returned a confirmed real-time price for this symbol — the price above came from the company profile snapshot instead, which can lag by an unknown and potentially long period. MANDATORY: footnote the Recent Price, Market Cap, Trailing P/E, Forward P/E, and Dividend Yield fields specifically with "(price as of last available snapshot — not confirmed real-time; verify before relying on this figure)". Do not present these price-derived fields with the same confidence as the audited financial-statement data elsewhere in this report — those remain reliable regardless of this warning.\n`;
+    }
     tableData += `Dividend Yield: ${metrics.divYield} | Market Cap: ${metrics.marketCap} | Beta: ${metrics.beta}\n`;
     tableData += `EV/EBITDA (TTM): ${metrics.evEbitdaTTM} | EV/EBITDA +1 Yr (E): ${metrics.evEbitdaFwd1} | EV/EBITDA +2 Yr (E): ${metrics.evEbitdaFwd2} | PEG: ${metrics.pegRatio}\n`;
     tableData += `Current Shares Outstanding: ${metrics.currentSharesM}M (most recent available — use this for the current/estimate year columns, NOT the historical weighted average)\n`;
@@ -717,7 +771,12 @@ module.exports = async (req, res) => {
 
       if (raw) {
         metrics = computeMetrics(raw);
-        console.log(`[TFG Research] FMP data loaded for ${metrics.companyName} (${metrics.ticker}) — price $${metrics.price}`);
+        if (metrics.priceIsLive) {
+          console.log(`[TFG Research] FMP data loaded for ${metrics.companyName} (${metrics.ticker}) — confirmed live price $${metrics.price} (via ${metrics.priceSource})`);
+        } else {
+          dataSource = 'fmp-partial';
+          console.warn(`[TFG Research] FMP data loaded for ${metrics.companyName} (${metrics.ticker}) but price could NOT be confirmed live (source: ${metrics.priceSource}, value ${metrics.price}). Financials are real; price/valuation fields will be flagged as unconfirmed.`);
+        }
       } else {
         console.log(`[TFG Research] No FMP data found for "${rawQuery}" (tried ticker "${ticker}"). Report will be flagged as model-estimated, not live-data-grounded.`);
         dataSource = 'estimated';
