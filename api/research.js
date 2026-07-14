@@ -129,6 +129,47 @@ async function fetchFMPData(ticker) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+   RESOLVE COMPANY NAME / TYPO'D TICKER → REAL FMP SYMBOL
+   Fixes the bug where "Tyler", "Tyler Technologies", "tyl", etc. get
+   uppercased into an invalid symbol (e.g. "TYLER" instead of "TYL"),
+   the FMP profile lookup silently returns nothing, and the report
+   generator falls back to having Claude fabricate the entire report
+   (financials, price, everything) from training-data recall instead
+   of live FMP data. That fabricated price is what shows up as
+   "Recent Price" and can be many months (or years) stale.
+   ═══════════════════════════════════════════════════════════════════════════ */
+async function resolveTicker(rawQuery) {
+  const q = encodeURIComponent(rawQuery.trim());
+  if (!q) return null;
+
+  // Try name search first (handles "Tyler Technologies", "Oracle", etc.)
+  try {
+    const nameResults = await fmpGet(`/stable/search-name?query=${q}&limit=5`);
+    const nameMatches = Array.isArray(nameResults) ? nameResults : [];
+    if (nameMatches.length > 0) {
+      console.log(`[TFG Research] search-name("${rawQuery}") -> ${nameMatches.map(m => m.symbol).join(', ')}`);
+      return nameMatches[0].symbol;
+    }
+  } catch (e) {
+    console.error(`[TFG Research] search-name failed for "${rawQuery}": ${e.message}`);
+  }
+
+  // Fall back to symbol search (handles lowercase / partial tickers)
+  try {
+    const symResults = await fmpGet(`/stable/search-symbol?query=${q}&limit=5`);
+    const symMatches = Array.isArray(symResults) ? symResults : [];
+    if (symMatches.length > 0) {
+      console.log(`[TFG Research] search-symbol("${rawQuery}") -> ${symMatches.map(m => m.symbol).join(', ')}`);
+      return symMatches[0].symbol;
+    }
+  } catch (e) {
+    console.error(`[TFG Research] search-symbol failed for "${rawQuery}": ${e.message}`);
+  }
+
+  return null;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
    NORMALIZE FMP DATA → METRICS BLOCK FOR PROMPT
    ═══════════════════════════════════════════════════════════════════════════ */
 function computeMetrics(data) {
@@ -426,6 +467,15 @@ function buildPrompt(query, metrics) {
 
     tableData += `\n══════ END PRE-FETCHED DATA ══════\n`;
     tableData += `USE THIS DATA to populate all tables, charts, and metrics in the report. Fill in estimate (E) columns using the analyst consensus data above. Where data gaps exist, use your training knowledge to fill reasonable estimates and flag with (E). For the "Good for What?!?" section, provide opinionated analysis.\n`;
+  } else {
+    // No live FMP data could be matched to this query (invalid/unrecognized
+    // ticker or company name). Do NOT let the model quietly present
+    // training-data recall as if it were current market data — force a
+    // visible disclaimer so end users can tell this report is unverified.
+    tableData = `\n\n══════ NO LIVE MARKET DATA AVAILABLE ══════\n`;
+    tableData += `FMP lookup failed for the query "${query}" — no matching ticker or company was found.\n`;
+    tableData += `MANDATORY: At the very top of the report, before anything else, render a clearly visible warning banner (bold, high-contrast background) stating: "Live market data unavailable for '${query}'. The figures below are estimated from general knowledge and are NOT sourced from Financial Modeling Prep. Verify the ticker symbol and regenerate before relying on this report." Every price, valuation multiple, and financial figure you include must also be individually flagged with (E) for estimate. Do not present any number as if it came from a live data feed.\n`;
+    tableData += `══════ END ══════\n`;
   }
 
   const today = new Date();
@@ -642,21 +692,39 @@ module.exports = async (req, res) => {
       return res.status(500).json({ error: 'FMP_API_KEY not configured.' });
     }
 
-    const ticker = query.trim().toUpperCase();
+    const rawQuery = query.trim();
+    let ticker = rawQuery.toUpperCase();
     console.log(`[TFG Research] Fetching FMP data for: ${ticker}`);
 
     // Fetch and compute metrics
     let metrics = null;
+    let dataSource = 'fmp';
     try {
-      const raw = await fetchFMPData(ticker);
+      let raw = await fetchFMPData(ticker);
+
+      // Direct symbol lookup failed — user probably typed a company name
+      // (or a mistyped/legacy ticker). Try to resolve it via FMP search
+      // instead of silently falling through to a hallucinated report.
+      if (!raw) {
+        console.log(`[TFG Research] "${ticker}" not found as a ticker — trying name/symbol search`);
+        const resolved = await resolveTicker(rawQuery);
+        if (resolved && resolved.toUpperCase() !== ticker) {
+          console.log(`[TFG Research] Resolved "${rawQuery}" -> ${resolved}`);
+          ticker = resolved.toUpperCase();
+          raw = await fetchFMPData(ticker);
+        }
+      }
+
       if (raw) {
         metrics = computeMetrics(raw);
-        console.log(`[TFG Research] FMP data loaded for ${metrics.companyName} (${metrics.ticker})`);
+        console.log(`[TFG Research] FMP data loaded for ${metrics.companyName} (${metrics.ticker}) — price $${metrics.price}`);
       } else {
-        console.log(`[TFG Research] Ticker not found in FMP: ${ticker}`);
+        console.log(`[TFG Research] No FMP data found for "${rawQuery}" (tried ticker "${ticker}"). Report will be flagged as model-estimated, not live-data-grounded.`);
+        dataSource = 'estimated';
       }
     } catch (fmpErr) {
       console.error(`[TFG Research] FMP fetch error: ${fmpErr.message}`);
+      dataSource = 'estimated';
     }
 
     // Build prompt and call Anthropic
@@ -704,7 +772,7 @@ module.exports = async (req, res) => {
           `INSERT INTO reports (id, ticker, company_name, html, source)
            VALUES ($1, $2, $3, $4, $5)
            ON CONFLICT (id) DO UPDATE SET html = $4, company_name = $3, created_at = NOW()`,
-          [reportId, ticker, companyName, html, 'fmp']
+          [reportId, ticker, companyName, html, dataSource]
         );
         console.log(`[TFG Research] Report saved: ${reportId}`);
       } catch (dbErr) {
@@ -722,7 +790,7 @@ module.exports = async (req, res) => {
       reportId,
       ticker: metrics?.ticker || ticker,
       companyName,
-      source: 'fmp',
+      source: dataSource,
     });
 
   } catch (err) {
