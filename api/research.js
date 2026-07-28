@@ -73,53 +73,16 @@ function anthropicPost(payload) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
-   LIVE PRICE — tries multiple FMP quote endpoints in order, since any single
-   one can fail on a given plan/moment (rate limit, tier gating, transient
-   error). Only a genuinely successful, positive price from one of these is
-   trusted as "live." Everything else falls back to the profile snapshot,
-   and that fallback gets flagged rather than presented as current.
-   ═══════════════════════════════════════════════════════════════════════════ */
-async function fetchLivePrice(T) {
-  const attempts = [
-    { name: 'quote',             path: `/stable/quote?symbol=${T}` },
-    { name: 'batch-quote-short', path: `/stable/batch-quote-short?symbols=${T}` },
-    { name: 'quote-short',       path: `/stable/quote-short?symbol=${T}` },
-  ];
-
-  for (const attempt of attempts) {
-    try {
-      const result = await fmpGet(attempt.path);
-      const row = Array.isArray(result) ? result[0] : result;
-      if (row && row.price && isFinite(row.price) && row.price > 0) {
-        console.log(`[TFG Research] Live price for ${T} confirmed via ${attempt.name}: $${row.price}`);
-        return {
-          price: row.price,
-          marketCap: row.marketCap || null,
-          pe: row.pe || null,
-          eps: row.eps || null,
-          source: attempt.name,
-          timestamp: row.timestamp || row.date || null,
-        };
-      }
-    } catch (e) {
-      console.error(`[TFG Research] Live price attempt "${attempt.name}" failed for ${T}: ${e.message}`);
-    }
-  }
-  console.error(`[TFG Research] WARNING: no quote endpoint returned a confirmed live price for ${T}. Will fall back to profile snapshot price if available.`);
-  return null;
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
    FETCH ALL DATA FROM FMP
    ═══════════════════════════════════════════════════════════════════════════ */
 async function fetchFMPData(ticker) {
   const T = ticker.toUpperCase();
 
   // Parallel fetch all endpoints — using /stable/ query-param format (not legacy /api/v3/ path format)
-  const [profileArr, liveQuote, incomeArr, balanceArr, cashFlowArr, keyMetricsArr,
-         ratiosArr, estimatesArr, priceHistory, dividendArr, spyProfile, incomeQtrArr] = await Promise.all([
+  const [profileArr, quoteArr, incomeArr, balanceArr, cashFlowArr, keyMetricsArr,
+         ratiosArr, estimatesArr, priceHistory, dividendArr, spyProfile] = await Promise.all([
     fmpGet(`/stable/profile?symbol=${T}`),
-    fetchLivePrice(T),
+    fmpGet(`/stable/batch-quote-short?symbols=${T}`),
     fmpGet(`/stable/income-statement?symbol=${T}&limit=7`),
     fmpGet(`/stable/balance-sheet-statement?symbol=${T}&limit=7`),
     fmpGet(`/stable/cash-flow-statement?symbol=${T}&limit=7`),
@@ -129,7 +92,6 @@ async function fetchFMPData(ticker) {
     fmpGet(`/stable/historical-price-eod/full?symbol=${T}`),
     fmpGet(`/stable/historical-price-eod/dividend?symbol=${T}`),
     fmpGet(`/stable/profile?symbol=SPY`),
-    fmpGet(`/stable/income-statement?symbol=${T}&period=quarter&limit=1`),
   ]);
 
   const profile = (Array.isArray(profileArr) ? profileArr[0] : profileArr) || {};
@@ -138,27 +100,15 @@ async function fetchFMPData(ticker) {
     return null; // ticker not found
   }
 
-  // Overlay confirmed live quote data onto profile (has live price, mktCap, volume).
-  // If no endpoint could confirm a live price, keep whatever profile.price already
-  // held (a company-profile snapshot) but mark it explicitly as unconfirmed so
-  // downstream code can flag it instead of presenting it as current.
-  const snapshotPrice = profile.price || null;
-  if (liveQuote && liveQuote.price) {
-    profile.price = liveQuote.price;
-    profile.priceIsLive = true;
-    profile.priceSource = liveQuote.source;
-    if (liveQuote.marketCap) profile.mktCap = liveQuote.marketCap;
-    if (liveQuote.pe) profile.pe = liveQuote.pe;
-    if (liveQuote.eps) profile.eps = liveQuote.eps;
-
-    if (snapshotPrice && Math.abs(snapshotPrice - liveQuote.price) / liveQuote.price > 0.15) {
-      console.error(`[TFG Research] PRICE DIVERGENCE for ${T}: profile snapshot $${snapshotPrice} vs confirmed live quote $${liveQuote.price} (>15% apart, via ${liveQuote.source}). Using the live quote — but this gap is worth a manual look if it recurs.`);
-    }
-  } else {
-    profile.priceIsLive = false;
-    profile.priceSource = snapshotPrice ? 'profile-snapshot' : 'none';
-    console.error(`[TFG Research] Using UNCONFIRMED price for ${T}: $${snapshotPrice || 'none'} (profile snapshot, not a live quote). Report will be flagged accordingly.`);
+  // Overlay real-time quote data onto profile (quote has live price, mktCap, volume)
+  const quote = (Array.isArray(quoteArr) ? quoteArr[0] : quoteArr) || {};
+  if (quote.price) {
+    profile.price = quote.price;
+    console.log(`[TFG Research] Live quote price for ${T}: $${quote.price}`);
   }
+  if (quote.marketCap) profile.mktCap = quote.marketCap;
+  if (quote.pe) profile.pe = quote.pe;
+  if (quote.eps) profile.eps = quote.eps;
 
   const income    = Array.isArray(incomeArr)    ? incomeArr    : [];
   const balance   = Array.isArray(balanceArr)   ? balanceArr   : [];
@@ -171,58 +121,15 @@ async function fetchFMPData(ticker) {
     : (priceHistory && priceHistory.historical ? priceHistory.historical : []);
   const divHist = Array.isArray(dividendArr) ? dividendArr
     : (dividendArr && dividendArr.historical ? dividendArr.historical : []);
-  // Most recent quarterly income statement — for current share count
-  const incomeQtr = Array.isArray(incomeQtrArr) ? incomeQtrArr : [];
 
-  return { profile, income, balance, cashFlow, keyMetr, ratios, estimates, priceHist, divHist, incomeQtr, ticker: T };
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
-   RESOLVE COMPANY NAME / TYPO'D TICKER → REAL FMP SYMBOL
-   Fixes the bug where "Tyler", "Tyler Technologies", "tyl", etc. get
-   uppercased into an invalid symbol (e.g. "TYLER" instead of "TYL"),
-   the FMP profile lookup silently returns nothing, and the report
-   generator falls back to having Claude fabricate the entire report
-   (financials, price, everything) from training-data recall instead
-   of live FMP data. That fabricated price is what shows up as
-   "Recent Price" and can be many months (or years) stale.
-   ═══════════════════════════════════════════════════════════════════════════ */
-async function resolveTicker(rawQuery) {
-  const q = encodeURIComponent(rawQuery.trim());
-  if (!q) return null;
-
-  // Try name search first (handles "Tyler Technologies", "Oracle", etc.)
-  try {
-    const nameResults = await fmpGet(`/stable/search-name?query=${q}&limit=5`);
-    const nameMatches = Array.isArray(nameResults) ? nameResults : [];
-    if (nameMatches.length > 0) {
-      console.log(`[TFG Research] search-name("${rawQuery}") -> ${nameMatches.map(m => m.symbol).join(', ')}`);
-      return nameMatches[0].symbol;
-    }
-  } catch (e) {
-    console.error(`[TFG Research] search-name failed for "${rawQuery}": ${e.message}`);
-  }
-
-  // Fall back to symbol search (handles lowercase / partial tickers)
-  try {
-    const symResults = await fmpGet(`/stable/search-symbol?query=${q}&limit=5`);
-    const symMatches = Array.isArray(symResults) ? symResults : [];
-    if (symMatches.length > 0) {
-      console.log(`[TFG Research] search-symbol("${rawQuery}") -> ${symMatches.map(m => m.symbol).join(', ')}`);
-      return symMatches[0].symbol;
-    }
-  } catch (e) {
-    console.error(`[TFG Research] search-symbol failed for "${rawQuery}": ${e.message}`);
-  }
-
-  return null;
+  return { profile, income, balance, cashFlow, keyMetr, ratios, estimates, priceHist, divHist, ticker: T };
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
    NORMALIZE FMP DATA → METRICS BLOCK FOR PROMPT
    ═══════════════════════════════════════════════════════════════════════════ */
 function computeMetrics(data) {
-  const { profile, income, balance, cashFlow, keyMetr, ratios, estimates, priceHist, divHist, incomeQtr, ticker } = data;
+  const { profile, income, balance, cashFlow, keyMetr, ratios, estimates, priceHist, divHist, ticker } = data;
 
   // Sort financials by date ascending (oldest first)
   const sortByDate = arr => [...arr].sort((a, b) => new Date(a.date) - new Date(b.date));
@@ -252,7 +159,8 @@ function computeMetrics(data) {
   const metrics = [
     'Revenues per Share', 'Earnings per Share', 'Book Value per Share',
     'Shares/Units Outstanding (M)', 'Avg Ann\'l P/E Ratio', 'Relative P/E Ratio',
-    'Avg Ann\'l Dist. Yield', 'Revenues ($mill)', 'EBITDA ($mill)', 'EBITDA Margin (%)',
+    'Avg Ann\'l Dist. Yield', 'Revenues ($mill)', 'EBITDA ($mill)', 'EBITDA Growth Rate (%)',
+    'Enterprise Value/EBITDA (x)', 'EBITDA PEG', 'EBITDA Margin (%)',
     'Operating Margin (%)', 'Net Profit ($mill)', 'Net Profit Margin (%)',
     'Cash Flow ($mill)', 'Capital Expenditures ($mill)', 'Free Cash Flow ($mill)',
     'Working Cap\'l ($mill)', 'Long-Term Debt ($mill)',
@@ -262,33 +170,9 @@ function computeMetrics(data) {
 
   metrics.forEach(m => { rows[m] = []; });
 
-  // Current shares outstanding — best available source:
-  // 1. Most recent quarterly income statement (weightedAverageShsOutDil)
-  // 2. Most recent annual income statement (weightedAverageShsOutDil)
-  // 3. Profile mktCap / live price (ONLY if both are from the same snapshot — unreliable as fallback)
-  let currentSharesOut = null;
-  let sharesSource = 'none';
-  const qtr = (data.incomeQtr && data.incomeQtr.length > 0) ? data.incomeQtr[0] : null;
-  if (qtr && (qtr.weightedAverageShsOutDil || qtr.weightedAverageShsOut)) {
-    currentSharesOut = qtr.weightedAverageShsOutDil || qtr.weightedAverageShsOut;
-    sharesSource = `Q${qtr.period || '?'} ${qtr.calendarYear || qtr.date || ''}`;
-    console.log(`[TFG Research] Shares from quarterly filing (${sharesSource}): ${(currentSharesOut / 1e6).toFixed(1)}M`);
-  } else if (inc.length > 0) {
-    const lastInc = inc[inc.length - 1];
-    currentSharesOut = lastInc.weightedAverageShsOutDil || lastInc.weightedAverageShsOut;
-    sharesSource = `FY annual`;
-    if (currentSharesOut) console.log(`[TFG Research] Shares from annual filing: ${(currentSharesOut / 1e6).toFixed(1)}M`);
-  }
-
-  // Recompute market cap from live price × current shares (profile.mktCap is often stale)
-  if (currentSharesOut && profile.price && profile.price > 0) {
-    const liveMktCap = profile.price * currentSharesOut;
-    console.log(`[TFG Research] Market cap override: $${(liveMktCap / 1e9).toFixed(2)}B (was $${((profile.mktCap || 0) / 1e9).toFixed(2)}B from profile)`);
-    profile.mktCap = liveMktCap;
-  }
-
   const fullYears = inc.map(i => i.calendarYear || new Date(i.date).getFullYear().toString());
 
+  let prevEbitda = null; // tracks prior-year EBITDA for the YoY growth-rate calc below
   for (let idx = 0; idx < inc.length; idx++) {
     const i = inc[idx];
     const fy = fullYears[idx];
@@ -298,11 +182,7 @@ function computeMetrics(data) {
     const k = km[idx]  || {};
     const r = rat[idx]  || {};
 
-    // For the most recent year, use current shares if available (quarterly filing or recomputed)
-    const isLastYear = (idx === inc.length - 1);
-    const shares = isLastYear && currentSharesOut
-      ? currentSharesOut
-      : (i.weightedAverageShsOutDil || i.weightedAverageShsOut) || null;
+    const shares = (i.weightedAverageShsOut || profile.mktCap / profile.price) || null;
     const sharesM = shares ? shares / 1e6 : null;
     const revenue = i.revenue || 0;
     const netIncome = i.netIncome || 0;
@@ -341,6 +221,23 @@ function computeMetrics(data) {
     const roe = totalEquity > 0 ? netIncome / totalEquity : null;
     const payoutRatio = netIncome > 0 && annualDiv && shares ? (annualDiv * shares) / netIncome : null;
 
+    // EBITDA Growth Rate (YoY %) — blank in the oldest column, no prior-year comp exists
+    const ebitdaGrowthPct = (prevEbitda != null && prevEbitda !== 0)
+      ? ((ebitda - prevEbitda) / Math.abs(prevEbitda)) * 100
+      : null;
+
+    // Enterprise Value/EBITDA (x) — Value Line-style avg-annual multiple for that year:
+    // (avg annual price × shares = avg market cap) + LT debt − cash, over that year's EBITDA
+    const cashYr = b.cashAndCashEquivalents || b.cashAndShortTermInvestments || 0;
+    const yearEV = (avgPrice && shares) ? (avgPrice * shares) + ltDebt - cashYr : null;
+    const yearEvEbitda = (yearEV != null && ebitda > 0) ? yearEV / ebitda : null;
+
+    // EBITDA PEG (TFG proprietary): EV/EBITDA (x) ÷ EBITDA Growth Rate (as a plain number, e.g. 26.5)
+    // N/M when growth is zero or negative — the ratio isn't meaningful in that case
+    const ebitdaPeg = (yearEvEbitda != null && ebitdaGrowthPct != null)
+      ? (ebitdaGrowthPct > 0 ? yearEvEbitda / ebitdaGrowthPct : 'N/M')
+      : null;
+
     rows['Revenues per Share'].push(fmt(revPerShare ? revPerShare : null));
     rows['Earnings per Share'].push(fmt(eps));
     rows['Book Value per Share'].push(fmt(bvps));
@@ -350,6 +247,9 @@ function computeMetrics(data) {
     rows['Avg Ann\'l Dist. Yield'].push(divYield != null ? fmtPct(divYield) : '—');
     rows['Revenues ($mill)'].push(fmt(revenue / 1e6, 1));
     rows['EBITDA ($mill)'].push(fmt(ebitda / 1e6, 1));
+    rows['EBITDA Growth Rate (%)'].push(ebitdaGrowthPct != null ? fmt(ebitdaGrowthPct, 1) : '—');
+    rows['Enterprise Value/EBITDA (x)'].push(yearEvEbitda != null ? fmt(yearEvEbitda, 1) : '—');
+    rows['EBITDA PEG'].push(ebitdaPeg === 'N/M' ? 'N/M' : (ebitdaPeg != null ? fmt(ebitdaPeg, 2) : '—'));
     rows['EBITDA Margin (%)'].push(revenue > 0 ? fmt(ebitda / revenue * 100, 1) : '—');
     rows['Operating Margin (%)'].push(revenue > 0 ? fmt(opIncome / revenue * 100, 1) : '—');
     rows['Net Profit ($mill)'].push(fmt(netIncome / 1e6, 1));
@@ -364,6 +264,8 @@ function computeMetrics(data) {
     rows['Return on Equity (%)'].push(roe != null ? fmt(roe * 100, 1) : '—');
     rows['Dist. Decl\'d per Share'].push(annualDiv > 0 ? fmt(annualDiv) : '—');
     rows['All Dist. to Net Profit (%)'].push(payoutRatio != null ? fmt(payoutRatio * 100, 1) : '—');
+
+    prevEbitda = ebitda;
   }
 
   // Price highs/lows per year — use actual high/low fields from EOD data
@@ -435,8 +337,6 @@ function computeMetrics(data) {
   const pegRatio = epsGrowth && epsGrowth > 2 && forwardPE !== '—'
     ? (parseFloat(forwardPE) / epsGrowth).toFixed(2) : 'N/M';
 
-  const currentSharesM = currentSharesOut ? (currentSharesOut / 1e6).toFixed(1) : '—';
-
   return {
     ticker,
     companyName: profile.companyName || ticker,
@@ -447,8 +347,6 @@ function computeMetrics(data) {
     ceo: profile.ceo || '',
     website: profile.website || '',
     price: profile.price ? `$${profile.price.toFixed(2)}` : '—',
-    priceIsLive: profile.priceIsLive === true,
-    priceSource: profile.priceSource || 'none',
     trailingPE,
     forwardPE,
     divYield: divYieldCurrent,
@@ -458,7 +356,6 @@ function computeMetrics(data) {
     evEbitdaFwd1,
     evEbitdaFwd2,
     pegRatio,
-    currentSharesM,
     years,
     fullYears,
     rows,
@@ -480,12 +377,8 @@ function buildPrompt(query, metrics) {
     tableData += `Company: ${metrics.companyName} (${metrics.ticker})\n`;
     tableData += `Exchange: ${metrics.exchange} | Sector: ${metrics.sector} | Industry: ${metrics.industry}\n`;
     tableData += `Price: ${metrics.price} | Trailing P/E: ${metrics.trailingPE} | Forward P/E: ${metrics.forwardPE}\n`;
-    if (!metrics.priceIsLive) {
-      tableData += `⚠ PRICE NOT CONFIRMED LIVE (source: ${metrics.priceSource}): No quote endpoint (quote / batch-quote-short / quote-short) returned a confirmed real-time price for this symbol — the price above came from the company profile snapshot instead, which can lag by an unknown and potentially long period. MANDATORY: footnote the Recent Price, Market Cap, Trailing P/E, Forward P/E, and Dividend Yield fields specifically with "(price as of last available snapshot — not confirmed real-time; verify before relying on this figure)". Do not present these price-derived fields with the same confidence as the audited financial-statement data elsewhere in this report — those remain reliable regardless of this warning.\n`;
-    }
     tableData += `Dividend Yield: ${metrics.divYield} | Market Cap: ${metrics.marketCap} | Beta: ${metrics.beta}\n`;
     tableData += `EV/EBITDA (TTM): ${metrics.evEbitdaTTM} | EV/EBITDA +1 Yr (E): ${metrics.evEbitdaFwd1} | EV/EBITDA +2 Yr (E): ${metrics.evEbitdaFwd2} | PEG: ${metrics.pegRatio}\n`;
-    tableData += `Current Shares Outstanding: ${metrics.currentSharesM}M (most recent available — use this for the current/estimate year columns, NOT the historical weighted average)\n`;
 
     if (metrics.description) {
       tableData += `\nBusiness Description: ${metrics.description.slice(0, 600)}...\n`;
@@ -521,15 +414,6 @@ function buildPrompt(query, metrics) {
 
     tableData += `\n══════ END PRE-FETCHED DATA ══════\n`;
     tableData += `USE THIS DATA to populate all tables, charts, and metrics in the report. Fill in estimate (E) columns using the analyst consensus data above. Where data gaps exist, use your training knowledge to fill reasonable estimates and flag with (E). For the "Good for What?!?" section, provide opinionated analysis.\n`;
-  } else {
-    // No live FMP data could be matched to this query (invalid/unrecognized
-    // ticker or company name). Do NOT let the model quietly present
-    // training-data recall as if it were current market data — force a
-    // visible disclaimer so end users can tell this report is unverified.
-    tableData = `\n\n══════ NO LIVE MARKET DATA AVAILABLE ══════\n`;
-    tableData += `FMP lookup failed for the query "${query}" — no matching ticker or company was found.\n`;
-    tableData += `MANDATORY: At the very top of the report, before anything else, render a clearly visible warning banner (bold, high-contrast background) stating: "Live market data unavailable for '${query}'. The figures below are estimated from general knowledge and are NOT sourced from Financial Modeling Prep. Verify the ticker symbol and regenerate before relying on this report." Every price, valuation multiple, and financial figure you include must also be individually flagged with (E) for estimate. Do not present any number as if it came from a live data feed.\n`;
-    tableData += `══════ END ══════\n`;
   }
 
   const today = new Date();
@@ -591,12 +475,23 @@ RIGHT — stacked: Price Range Bar → Chart → Financial Table
    Rows in exact order:
    Revenues per Share | Earnings per Share | Book Value per Share | Shares/Units Outstanding (M) |
    Avg Ann'l P/E Ratio | Relative P/E Ratio | Avg Ann'l Dist. Yield | Revenues ($mill) |
-   EBITDA ($mill) | EBITDA Margin (%) | Operating Margin (%) | Net Profit ($mill) |
+   EBITDA ($mill) | EBITDA Growth Rate (%) | Enterprise Value/EBITDA (x) | EBITDA PEG |
+   EBITDA Margin (%) | Operating Margin (%) | Net Profit ($mill) |
    Net Profit Margin (%) | Cash Flow ($mill) | Capital Expenditures ($mill) | Free Cash Flow ($mill) |
    Working Cap'l ($mill) | Long-Term Debt ($mill) | Partners'/Shareholders' Capital ($mill) |
    Return on Total Cap'l (%) | Return on Equity (%) | Dist. Decl'd per Share | All Dist. to Net Profit (%)
 
    Use — for unavailable data.
+
+   EBITDA Growth Rate (%) = YoY % change in EBITDA. "—" in the oldest column (no prior-year comp).
+   Enterprise Value/EBITDA (x) = Enterprise Value ÷ EBITDA for that column. Historical columns are
+     pre-computed for you above. For the current FY(E) and next FY(E) columns, reuse the EV/EBITDA
+     +1 Yr (E) and +2 Yr (E) figures already given above (same EV, same methodology). For the 3-5yr
+     range column, apply the same formula to your own extrapolated EBITDA and flag with (E).
+   EBITDA PEG (TFG proprietary metric) = Enterprise Value/EBITDA (x) ÷ EBITDA Growth Rate (%), using
+     the growth rate as a plain number (e.g. 26.5, not 0.265). Display as N/M whenever the growth rate
+     is zero or negative — the ratio is not meaningful in that case. This is NOT the same as the header
+     row's "PEG Ratio" (Forward P/E ÷ EPS growth) — keep the two distinct.
 
 ════════════════════════════════════
 SECTION 3 — HISTORICAL VALUATION CHARTS
@@ -746,44 +641,21 @@ module.exports = async (req, res) => {
       return res.status(500).json({ error: 'FMP_API_KEY not configured.' });
     }
 
-    const rawQuery = query.trim();
-    let ticker = rawQuery.toUpperCase();
+    const ticker = query.trim().toUpperCase();
     console.log(`[TFG Research] Fetching FMP data for: ${ticker}`);
 
     // Fetch and compute metrics
     let metrics = null;
-    let dataSource = 'fmp';
     try {
-      let raw = await fetchFMPData(ticker);
-
-      // Direct symbol lookup failed — user probably typed a company name
-      // (or a mistyped/legacy ticker). Try to resolve it via FMP search
-      // instead of silently falling through to a hallucinated report.
-      if (!raw) {
-        console.log(`[TFG Research] "${ticker}" not found as a ticker — trying name/symbol search`);
-        const resolved = await resolveTicker(rawQuery);
-        if (resolved && resolved.toUpperCase() !== ticker) {
-          console.log(`[TFG Research] Resolved "${rawQuery}" -> ${resolved}`);
-          ticker = resolved.toUpperCase();
-          raw = await fetchFMPData(ticker);
-        }
-      }
-
+      const raw = await fetchFMPData(ticker);
       if (raw) {
         metrics = computeMetrics(raw);
-        if (metrics.priceIsLive) {
-          console.log(`[TFG Research] FMP data loaded for ${metrics.companyName} (${metrics.ticker}) — confirmed live price $${metrics.price} (via ${metrics.priceSource})`);
-        } else {
-          dataSource = 'fmp-partial';
-          console.warn(`[TFG Research] FMP data loaded for ${metrics.companyName} (${metrics.ticker}) but price could NOT be confirmed live (source: ${metrics.priceSource}, value ${metrics.price}). Financials are real; price/valuation fields will be flagged as unconfirmed.`);
-        }
+        console.log(`[TFG Research] FMP data loaded for ${metrics.companyName} (${metrics.ticker})`);
       } else {
-        console.log(`[TFG Research] No FMP data found for "${rawQuery}" (tried ticker "${ticker}"). Report will be flagged as model-estimated, not live-data-grounded.`);
-        dataSource = 'estimated';
+        console.log(`[TFG Research] Ticker not found in FMP: ${ticker}`);
       }
     } catch (fmpErr) {
       console.error(`[TFG Research] FMP fetch error: ${fmpErr.message}`);
-      dataSource = 'estimated';
     }
 
     // Build prompt and call Anthropic
@@ -831,7 +703,7 @@ module.exports = async (req, res) => {
           `INSERT INTO reports (id, ticker, company_name, html, source)
            VALUES ($1, $2, $3, $4, $5)
            ON CONFLICT (id) DO UPDATE SET html = $4, company_name = $3, created_at = NOW()`,
-          [reportId, ticker, companyName, html, dataSource]
+          [reportId, ticker, companyName, html, 'fmp']
         );
         console.log(`[TFG Research] Report saved: ${reportId}`);
       } catch (dbErr) {
@@ -849,7 +721,7 @@ module.exports = async (req, res) => {
       reportId,
       ticker: metrics?.ticker || ticker,
       companyName,
-      source: dataSource,
+      source: 'fmp',
     });
 
   } catch (err) {
