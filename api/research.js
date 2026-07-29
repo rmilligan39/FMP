@@ -75,6 +75,63 @@ function anthropicPost(payload) {
 /* ═══════════════════════════════════════════════════════════════════════════
    FETCH ALL DATA FROM FMP
    ═══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Resolve a raw user query (ticker OR company name) to a confirmed FMP ticker symbol.
+ * Never guesses on ambiguous input — returns candidates for the caller to surface instead.
+ *
+ * Returns one of:
+ *   { status: 'RESOLVED',        ticker }
+ *   { status: 'NEEDS_SELECTION', candidates: [{ symbol, name, exchange, currency }, ...] }
+ *   { status: 'NOT_FOUND' }
+ *
+ * NOTE: the /stable/search-name path below has not been verified against a live FMP
+ * response from this environment — confirm the endpoint name and response field names
+ * (symbol/name/exchangeShortName/currency) against a real call before relying on this
+ * in production, the same way /stable/quote vs /stable/batch-quote-short was verified.
+ */
+async function resolveTickerSymbol(rawQuery) {
+  const raw = rawQuery.trim();
+  const asTicker = raw.toUpperCase();
+
+  // Fast path: try the input directly as a ticker symbol — covers the normal, correct-ticker case
+  // with a single request, and preserves today's behavior/speed for users who type the real ticker.
+  const directArr = await fmpGet(`/stable/profile?symbol=${encodeURIComponent(asTicker)}`);
+  const direct = (Array.isArray(directArr) ? directArr[0] : directArr) || {};
+  if (direct.companyName || direct.symbol) {
+    return { status: 'RESOLVED', ticker: direct.symbol || asTicker };
+  }
+
+  // Direct match failed — the input is likely a company name. Search FMP by name.
+  const results = await fmpGet(`/stable/search-name?query=${encodeURIComponent(raw)}&limit=8`);
+  const candidates = (Array.isArray(results) ? results : []).map(c => ({
+    symbol: c.symbol,
+    name: c.name,
+    exchange: c.exchangeShortName || c.exchange || '',
+    currency: c.currency || '',
+  })).filter(c => c.symbol);
+
+  if (candidates.length === 0) {
+    return { status: 'NOT_FOUND' };
+  }
+
+  if (candidates.length === 1) {
+    // Only one plausible match — nothing to disambiguate. Confirm it resolves to a
+    // real profile before proceeding, then skip the extra round trip entirely.
+    const profArr = await fmpGet(`/stable/profile?symbol=${encodeURIComponent(candidates[0].symbol)}`);
+    const prof = (Array.isArray(profArr) ? profArr[0] : profArr) || {};
+    if (prof.companyName || prof.symbol) {
+      return { status: 'RESOLVED', ticker: prof.symbol || candidates[0].symbol };
+    }
+    return { status: 'NOT_FOUND' };
+  }
+
+  // Multiple candidates — don't guess, even if one name looks like an "exact" match.
+  // Ticker/name collisions (OTC look-alikes, foreign listings, defunct entities) are
+  // exactly the failure mode the pre-flight validation protocol exists to catch.
+  return { status: 'NEEDS_SELECTION', candidates };
+}
+
 async function fetchFMPData(ticker) {
   const T = ticker.toUpperCase();
 
@@ -641,8 +698,33 @@ module.exports = async (req, res) => {
       return res.status(500).json({ error: 'FMP_API_KEY not configured.' });
     }
 
-    const ticker = query.trim().toUpperCase();
-    console.log(`[TFG Research] Fetching FMP data for: ${ticker}`);
+    const rawQuery = query.trim();
+    console.log(`[TFG Research] Resolving: "${rawQuery}"`);
+
+    const resolution = await resolveTickerSymbol(rawQuery);
+
+    if (resolution.status === 'NOT_FOUND') {
+      console.log(`[TFG Research] No match found for: "${rawQuery}"`);
+      return res.status(404).json({
+        error: `No company or ticker matching "${rawQuery}" was found on Financial Modeling Prep. Check the spelling, or try the exact ticker symbol.`,
+        reason: 'NOT_FOUND',
+      });
+    }
+
+    if (resolution.status === 'NEEDS_SELECTION') {
+      console.log(`[TFG Research] "${rawQuery}" is ambiguous — ${resolution.candidates.length} candidates`);
+      // Not an error — a normal branch of the interaction. 200 so frontend fetch() doesn't
+      // treat this as a failure; the presence of needsSelection is what the frontend checks.
+      return res.status(200).json({
+        needsSelection: true,
+        query: rawQuery,
+        candidates: resolution.candidates,
+      });
+    }
+
+    // resolution.status === 'RESOLVED'
+    const ticker = resolution.ticker;
+    console.log(`[TFG Research] Resolved "${rawQuery}" -> ${ticker}`);
 
     // Fetch and compute metrics
     let metrics = null;
@@ -652,10 +734,22 @@ module.exports = async (req, res) => {
         metrics = computeMetrics(raw);
         console.log(`[TFG Research] FMP data loaded for ${metrics.companyName} (${metrics.ticker})`);
       } else {
-        console.log(`[TFG Research] Ticker not found in FMP: ${ticker}`);
+        console.log(`[TFG Research] FMP data fetch failed for resolved ticker: ${ticker}`);
       }
     } catch (fmpErr) {
       console.error(`[TFG Research] FMP fetch error: ${fmpErr.message}`);
+    }
+
+    // GUARDRAIL: never let Claude write a "grounded" institutional report with no actual
+    // data behind it. A resolved ticker can still fail here (FMP outage, auth issue, a
+    // valid-but-thinly-covered symbol) — in every case, stop instead of silently falling
+    // back to Claude's training memory for prices/financials.
+    if (!metrics) {
+      return res.status(502).json({
+        error: `"${ticker}" resolved, but financial data could not be retrieved from FMP. Please try again in a moment.`,
+        reason: 'DATA_FETCH_FAILED',
+        ticker,
+      });
     }
 
     // Build prompt and call Anthropic
