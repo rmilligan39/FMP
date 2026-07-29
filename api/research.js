@@ -106,10 +106,18 @@ async function resolveTickerSymbol(rawQuery) {
 
   // Fast path: try the input directly as a ticker symbol — covers the normal, correct-ticker case
   // with a single request, and preserves today's behavior/speed for users who type the real ticker.
+  // IMPORTANT: require the returned profile's symbol to exactly match what was typed. Some data
+  // providers' profile/lookup endpoints do their own internal fuzzy or nearest-match resolution
+  // (e.g. a near-miss symbol silently resolving to an unrelated real ticker) — if that happens here,
+  // trusting "a profile came back" instead of "the RIGHT profile came back" would skip the picker
+  // entirely and silently resolve to the wrong company. This is exactly the shape of the Ford Motor
+  // Co. / Forward Industries incident, so this check stays regardless of which root cause it turns
+  // out to be.
   const directArr = await fmpGet(`/stable/profile?symbol=${encodeURIComponent(asTicker)}`);
   const direct = (Array.isArray(directArr) ? directArr[0] : directArr) || {};
-  if (direct.companyName || direct.symbol) {
-    return { status: 'RESOLVED', ticker: direct.symbol || asTicker };
+  const directSymbol = (direct.symbol || '').toUpperCase();
+  if (directSymbol && directSymbol === asTicker) {
+    return { status: 'RESOLVED', ticker: direct.symbol };
   }
 
   // Direct match failed — the input is likely a company name. Search FMP by name.
