@@ -78,7 +78,14 @@ function anthropicPost(payload) {
 
 /**
  * Resolve a raw user query (ticker OR company name) to a confirmed FMP ticker symbol.
- * Never guesses on ambiguous input — returns candidates for the caller to surface instead.
+ * Never guesses on ambiguous or fuzzy-matched input — returns candidates for the caller
+ * to surface instead.
+ *
+ * RESOLVED only ever comes from an exact, literal ticker match (the fast path below).
+ * Any result reached via name search — even a single candidate — comes back as
+ * NEEDS_SELECTION, because a name search's relevance ranking is not something this app
+ * verifies or controls, and "only one result" does not mean "the right result" (see the
+ * Ford Motor Co. / Forward Industries incident this was written in response to).
  *
  * Returns one of:
  *   { status: 'RESOLVED',        ticker }
@@ -89,6 +96,9 @@ function anthropicPost(payload) {
  * response from this environment — confirm the endpoint name and response field names
  * (symbol/name/exchangeShortName/currency) against a real call before relying on this
  * in production, the same way /stable/quote vs /stable/batch-quote-short was verified.
+ * The Ford incident is itself evidence this endpoint's result quality needs a closer look —
+ * a search for "Ford" that doesn't surface Ford Motor Company at all is worth investigating
+ * directly (try /stable/search-name?query=Ford&apikey=... and see what actually comes back).
  */
 async function resolveTickerSymbol(rawQuery) {
   const raw = rawQuery.trim();
@@ -115,20 +125,13 @@ async function resolveTickerSymbol(rawQuery) {
     return { status: 'NOT_FOUND' };
   }
 
-  if (candidates.length === 1) {
-    // Only one plausible match — nothing to disambiguate. Confirm it resolves to a
-    // real profile before proceeding, then skip the extra round trip entirely.
-    const profArr = await fmpGet(`/stable/profile?symbol=${encodeURIComponent(candidates[0].symbol)}`);
-    const prof = (Array.isArray(profArr) ? profArr[0] : profArr) || {};
-    if (prof.companyName || prof.symbol) {
-      return { status: 'RESOLVED', ticker: prof.symbol || candidates[0].symbol };
-    }
-    return { status: 'NOT_FOUND' };
-  }
-
-  // Multiple candidates — don't guess, even if one name looks like an "exact" match.
-  // Ticker/name collisions (OTC look-alikes, foreign listings, defunct entities) are
-  // exactly the failure mode the pre-flight validation protocol exists to catch.
+  // Always let the user confirm — even a single search result isn't guaranteed correct.
+  // Real-world case: searching "Ford" returned exactly one candidate, "Forward Industries"
+  // (FWDI) — not Ford Motor Company — and the app silently generated a report for the
+  // wrong company with no warning. A name search's relevance ranking isn't verified or
+  // trustworthy enough to treat "only one result" as "the right result." Multiple
+  // candidates AND single candidates both route through the picker; only an exact,
+  // literal ticker match (the fast path above) skips confirmation.
   return { status: 'NEEDS_SELECTION', candidates };
 }
 
