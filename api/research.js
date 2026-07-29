@@ -104,30 +104,58 @@ async function resolveTickerSymbol(rawQuery) {
   const raw = rawQuery.trim();
   const asTicker = raw.toUpperCase();
 
-  // Fast path: try the input directly as a ticker symbol — covers the normal, correct-ticker case
-  // with a single request, and preserves today's behavior/speed for users who type the real ticker.
-  // IMPORTANT: require the returned profile's symbol to exactly match what was typed. Some data
-  // providers' profile/lookup endpoints do their own internal fuzzy or nearest-match resolution
-  // (e.g. a near-miss symbol silently resolving to an unrelated real ticker) — if that happens here,
-  // trusting "a profile came back" instead of "the RIGHT profile came back" would skip the picker
-  // entirely and silently resolve to the wrong company. This is exactly the shape of the Ford Motor
-  // Co. / Forward Industries incident, so this check stays regardless of which root cause it turns
-  // out to be.
-  const directArr = await fmpGet(`/stable/profile?symbol=${encodeURIComponent(asTicker)}`);
+  // Run the literal-ticker lookup, its live quote, and the name search together.
+  // The quote check is the fix for a regression the previous version introduced: it used
+  // to require the fast-path symbol to also show up in a company-NAME search, but a ticker
+  // string like "F" or "AAPL" isn't a company name and won't reliably appear there — that
+  // broke resubmission of an already-confirmed, correct ticker after picking it from the
+  // picker (every pick just produced another picker). A live quote is a direct, meaningful
+  // check for "is this genuinely a real, currently-traded security" instead.
+  const [directArr, quoteArr, searchResults] = await Promise.all([
+    fmpGet(`/stable/profile?symbol=${encodeURIComponent(asTicker)}`),
+    fmpGet(`/stable/batch-quote-short?symbols=${encodeURIComponent(asTicker)}`),
+    fmpGet(`/stable/search-name?query=${encodeURIComponent(raw)}&limit=8`),
+  ]);
+
   const direct = (Array.isArray(directArr) ? directArr[0] : directArr) || {};
   const directSymbol = (direct.symbol || '').toUpperCase();
-  if (directSymbol && directSymbol === asTicker) {
-    return { status: 'RESOLVED', ticker: direct.symbol };
+
+  // Log the raw fast-path response whenever it's non-empty, so a bad match can be inspected
+  // directly in Vercel's function logs (Deployments -> function -> Logs) instead of guessed at.
+  if (directSymbol) {
+    console.log(`[TFG Research] profile("${asTicker}") -> ${JSON.stringify(direct).slice(0, 500)}`);
   }
 
-  // Direct match failed — the input is likely a company name. Search FMP by name.
-  const results = await fmpGet(`/stable/search-name?query=${encodeURIComponent(raw)}&limit=8`);
-  const candidates = (Array.isArray(results) ? results : []).map(c => ({
+  const quote = (Array.isArray(quoteArr) ? quoteArr[0] : quoteArr) || {};
+  const hasLiveQuote = typeof quote.price === 'number' && quote.price > 0;
+
+  const candidates = (Array.isArray(searchResults) ? searchResults : []).map(c => ({
     symbol: c.symbol,
     name: c.name,
     exchange: c.exchangeShortName || c.exchange || '',
     currency: c.currency || '',
   })).filter(c => c.symbol);
+
+  // Gate 1: returned symbol must exactly match what was typed (rules out a silent redirect
+  //         or fuzzy-match to a completely different, unrelated symbol).
+  // Gate 2: profile must not be explicitly flagged inactive/delisted. NOTE: unverified from
+  //         this environment whether FMP's /stable/profile actually populates
+  //         isActivelyTrading — check the logged payload above to confirm.
+  // Gate 3: a live quote must exist for this exact symbol via the same batch-quote-short
+  //         endpoint the app already relies on for real-time pricing. A stale/historical
+  //         ticker alias (the Ford/Forward Industries theory) resolving to a company's
+  //         current profile data should still have no live, currently-traded price under
+  //         the OLD symbol — this is the load-bearing check now, not gate 2.
+  const exactSymbolMatch = directSymbol && directSymbol === asTicker;
+  const notFlaggedInactive = direct.isActivelyTrading !== false;
+
+  if (exactSymbolMatch && notFlaggedInactive && hasLiveQuote) {
+    return { status: 'RESOLVED', ticker: direct.symbol };
+  }
+
+  if (exactSymbolMatch) {
+    console.log(`[TFG Research] Fast-path match for "${asTicker}" REJECTED (inactive=${!notFlaggedInactive}, hasLiveQuote=${hasLiveQuote}) — routing through name-search confirmation instead`);
+  }
 
   if (candidates.length === 0) {
     return { status: 'NOT_FOUND' };
@@ -138,8 +166,8 @@ async function resolveTickerSymbol(rawQuery) {
   // (FWDI) — not Ford Motor Company — and the app silently generated a report for the
   // wrong company with no warning. A name search's relevance ranking isn't verified or
   // trustworthy enough to treat "only one result" as "the right result." Multiple
-  // candidates AND single candidates both route through the picker; only an exact,
-  // literal ticker match (the fast path above) skips confirmation.
+  // candidates AND single candidates both route through the picker; only a fully-verified,
+  // literal, live ticker match (the fast path above) skips confirmation.
   return { status: 'NEEDS_SELECTION', candidates };
 }
 
